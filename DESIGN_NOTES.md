@@ -67,3 +67,20 @@ see themselves, so their output is unchanged.
 A static batch reserves `longest_prompt + max(max_tokens)` slots per row, all up front.
 That reservation, plus finished rows that keep running until the longest row is done,
 are the costs continuous batching and paging remove, which is why this path exists.
+
+## Phase 3: continuous batching
+
+### Prefill-first scheduling
+Each step is either a prefill of newly admitted sequences or a decode of all running
+ones, never mixed. If anything can be admitted, the step prefills and running sequences
+wait one step. This is vLLM's default policy before chunked prefill: it keeps the batch
+full, at the cost of a decode stall when requests arrive (addressed in Phase 8).
+
+### One cache slot per sequence, reserved at admission
+Phase 3 gives each running sequence a contiguous max_model_len region. It is the
+simplest thing that lets sequences join and leave; the waste from over-reservation is
+what Phase 4's paging removes.
+
+### Engine and StaticEngine share one interface
+Both expose add_request, abort_request, step, has_unfinished_requests, so the offline
+helper, tests and benchmarks switch between them with `--scheduler`.

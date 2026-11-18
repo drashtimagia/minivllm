@@ -22,6 +22,26 @@ class EngineConfig:
         default=2048, metadata={"help": "max prompt plus generated tokens per sequence"}
     )
     seed: int = field(default=0, metadata={"help": "seed for the sampling generator"})
+    scheduler: str = field(
+        default="continuous",
+        metadata={
+            "help": "static: fixed batches run to completion; continuous: join and leave per step",
+            "choices": ["static", "continuous"],
+        },
+    )
+    max_num_seqs: int = field(default=16, metadata={"help": "max sequences in one batch"})
+    max_num_batched_tokens: int = field(
+        default=4096, metadata={"help": "max prompt tokens prefilled in one step"}
+    )
+
+    def __post_init__(self) -> None:
+        # Without chunked prefill a prompt is prefilled in one step, so the per-step
+        # token budget must fit the longest allowed prompt or that prompt never runs.
+        if self.max_num_batched_tokens < self.max_model_len:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must be >= "
+                f"max_model_len ({self.max_model_len})"
+            )
 
     @property
     def torch_dtype(self) -> torch.dtype:

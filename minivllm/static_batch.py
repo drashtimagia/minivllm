@@ -1,9 +1,14 @@
+from collections import deque
+
 import torch
 
+from minivllm.config import EngineConfig
 from minivllm.kv_cache import PaddedKVCache
+from minivllm.model_files import LoadedModel
 from minivllm.models.qwen2 import Qwen2ForCausalLM
 from minivllm.sampler import sample
-from minivllm.sequence import SamplingParams
+from minivllm.sequence import RequestOutput, SamplingParams
+from minivllm.validation import check_prompt_fits
 
 
 class StaticBatch:
@@ -36,6 +41,7 @@ class StaticBatch:
         self.cache = self._new_cache(capacity=self.prompt_len + max(self.max_new))
         self.outputs: list[list[int]] = [[] for _ in prompts]
         self.finished = [False] * len(prompts)
+        self.finish_reasons: list[str | None] = [None] * len(prompts)
         self._pending_prompts: list[list[int]] | None = prompts
 
     @property
@@ -55,7 +61,7 @@ class StaticBatch:
         return [self._record(row, token) for row, token in enumerate(tokens)]
 
     def abort(self, row: int) -> None:
-        self.finished[row] = True
+        self._finish(row, "abort")
 
     def _prefill(self, prompts: list[list[int]]) -> torch.Tensor:
         # Left padding puts every prompt's last token in the final column, so one slice
@@ -86,10 +92,15 @@ class StaticBatch:
         if self.finished[row]:
             return None
         self.outputs[row].append(token)
-        hit_eos = token in self.eos_token_ids and not self.params[row].ignore_eos
-        if hit_eos or len(self.outputs[row]) >= self.max_new[row]:
-            self.finished[row] = True
+        if token in self.eos_token_ids and not self.params[row].ignore_eos:
+            self._finish(row, "stop")
+        elif len(self.outputs[row]) >= self.max_new[row]:
+            self._finish(row, "length")
         return token
+
+    def _finish(self, row: int, reason: str) -> None:
+        self.finished[row] = True
+        self.finish_reasons[row] = reason
 
     def _prompt_lens(self) -> list[int]:
         return [self.prompt_len - pad for pad in self.pad_lens]
@@ -106,3 +117,67 @@ class StaticBatch:
             device=self.device,
         )
 
+
+class StaticEngine:
+    """Engine interface over StaticBatch: a new batch is formed only when the previous
+    one has fully finished, from up to max_num_seqs waiting requests."""
+
+    def __init__(self, config: EngineConfig, loaded: LoadedModel) -> None:
+        self.config = config
+        self.model = loaded.model
+        self.tokenizer = loaded.tokenizer
+        self.eos_token_ids = loaded.eos_token_ids
+        self.rng = torch.Generator(device=config.device).manual_seed(config.seed)
+        self.waiting: deque[tuple[str, list[int], SamplingParams]] = deque()
+        self.batch: StaticBatch | None = None
+        self.batch_ids: list[str] = []
+
+    def add_request(self, request_id: str, prompt_token_ids: list[int], params: SamplingParams) -> None:
+        check_prompt_fits(prompt_token_ids, self.config.max_model_len)
+        self.waiting.append((request_id, list(prompt_token_ids), params))
+
+    def abort_request(self, request_id: str) -> bool:
+        for item in self.waiting:
+            if item[0] == request_id:
+                self.waiting.remove(item)
+                return True
+        if self.batch is not None and request_id in self.batch_ids:
+            self.batch.abort(self.batch_ids.index(request_id))
+            self._drop_batch_if_done()
+            return True
+        return False
+
+    def has_unfinished_requests(self) -> bool:
+        return bool(self.waiting) or self.batch is not None
+
+    def step(self) -> list[RequestOutput]:
+        if self.batch is None:
+            if not self.waiting:
+                return []
+            self._start_batch()
+        assert self.batch is not None
+        tokens = self.batch.step()
+        outputs = [
+            RequestOutput(rid, [tok], self.batch.finished[row], self.batch.finish_reasons[row])
+            for row, (rid, tok) in enumerate(zip(self.batch_ids, tokens))
+            if tok is not None
+        ]
+        self._drop_batch_if_done()
+        return outputs
+
+    def _start_batch(self) -> None:
+        take = [self.waiting.popleft() for _ in range(min(self.config.max_num_seqs, len(self.waiting)))]
+        self.batch_ids = [rid for rid, _, _ in take]
+        self.batch = StaticBatch(
+            self.model,
+            [prompt for _, prompt, _ in take],
+            [params for _, _, params in take],
+            self.eos_token_ids,
+            self.config.max_model_len,
+            self.rng,
+        )
+
+    def _drop_batch_if_done(self) -> None:
+        if self.batch is not None and self.batch.done:
+            self.batch = None
+            self.batch_ids = []

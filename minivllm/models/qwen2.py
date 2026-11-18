@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from safetensors.torch import load_file
 from torch import nn
 
-from minivllm.kv_cache import PaddedKVCache
+from minivllm.kv_cache import CacheAttention
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,7 @@ class Qwen2Attention(nn.Module):
         positions: torch.Tensor,
         hidden: torch.Tensor,
         rotary: RotaryEmbedding,
-        kv_cache: PaddedKVCache,
+        kv_cache: CacheAttention,
     ) -> torch.Tensor:
         num_tokens = hidden.shape[0]
         q = self.q_proj(hidden).view(num_tokens, self.num_heads, self.head_dim)
@@ -125,7 +125,7 @@ class Qwen2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden: torch.Tensor,
         rotary: RotaryEmbedding,
-        kv_cache: PaddedKVCache,
+        kv_cache: CacheAttention,
     ) -> torch.Tensor:
         hidden = hidden + self.self_attn(positions, self.input_layernorm(hidden), rotary, kv_cache)
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
@@ -142,7 +142,7 @@ class Qwen2Model(nn.Module):
         self.rotary = RotaryEmbedding(config.head_dim, config.rope_theta, max_positions)
 
     def forward(
-        self, input_ids: torch.Tensor, positions: torch.Tensor, kv_cache: PaddedKVCache
+        self, input_ids: torch.Tensor, positions: torch.Tensor, kv_cache: CacheAttention
     ) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
         for layer in self.layers:
@@ -163,7 +163,7 @@ class Qwen2ForCausalLM(nn.Module):
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(
-        self, input_ids: torch.Tensor, positions: torch.Tensor, kv_cache: PaddedKVCache
+        self, input_ids: torch.Tensor, positions: torch.Tensor, kv_cache: CacheAttention
     ) -> torch.Tensor:
         return self.model(input_ids, positions, kv_cache)
 
