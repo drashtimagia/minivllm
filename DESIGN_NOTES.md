@@ -228,3 +228,59 @@ Docker is not installed on the development machine, so the image has not been bu
 It installs the package with the server extra on `python:3.11-slim` and starts
 `python -m minivllm.server`. The pip `torch` wheel on Linux includes CUDA support, but
 that has not been checked either.
+
+## Phase 7: benchmarks
+
+### Status: written and unit tested, not run
+No GPU was available while this phase was written, so no benchmark has been run and
+`bench/results/` is empty. The scripts exist, their command construction and report
+generation are covered by tests with synthetic data, and the two offline scripts were
+smoke tested on CPU (output discarded). Every number the project will ever report has to
+come from `bench/run_all.sh` on a GPU machine. Until then the Phase 7 gate (raw results,
+charts and README tables committed) is open.
+
+### The vLLM comparison uses the vLLM client for everyone
+Every system, including minivllm, is driven by `vllm bench serve` over the same
+OpenAI-compatible completions endpoint, with `--ignore-eos` and a fixed output length so
+that every request generates the same number of tokens. The flags used were checked
+against the vLLM source tree (`vllm/benchmarks/serve.py`, `datasets.py`, `arg_utils.py`)
+but not against an installed vLLM; a version mismatch would show up as a client or server
+failing to start, not as a wrong number.
+
+### Same KV budget: `--kv-budget-gb` versus `--num-gpu-blocks-override`
+minivllm sizes its pool from `--kv-budget-gb`. vLLM is given the block count that the
+same budget buys (`kv_blocks_for_budget`, block size 16), so both hold the same number of
+tokens. vLLM still reserves its own working memory under `--gpu-memory-utilization`, so
+the budgets match for the cache, not for total GPU use.
+
+### Systems compared
+`static` (fixed batches), `continuous` (continuous batching with one block as large as a
+whole sequence, which is the contiguous per-sequence reservation Phase 3 used before
+paging replaced it), `paged` (block size 16), `paged_prefix` (plus prefix caching), and
+three vLLM configurations: `vllm` (defaults, so CUDA graphs and chunked prefill are on),
+`vllm_eager` (`--enforce-eager`) and `vllm_prefix` (prefix caching on). vLLM's default
+features that minivllm does not have yet are the reason both `vllm` and `vllm_eager`
+are run; Phase 8 closes some of that gap. The static system ignores `--kv-budget-gb`: its
+cache is sized per batch from the longest prompt and `max_tokens`.
+
+### Fresh server per run
+Each (system, workload, rate) starts a new server. Reusing one would let an earlier
+run's prefix cache and warmed allocator state leak into the next, and the cost is only
+model load time.
+
+### Results are tied to code
+`write_result` records commit hash, whether the tree was dirty, hardware, library
+versions, the exact commands and the raw `vllm bench serve` JSON. It refuses to write
+from a dirty tree unless `--allow-dirty` is given, in which case the file says so, and
+the generated tables show the commit and dirty flag next to every number.
+
+### Concurrency at a fixed budget is measured, not computed
+`bench/max_concurrency.py` admits many identical requests with the sequence cap lifted
+and records the peak number of sequences running at once, for a contiguous-sized block
+versus block size 16 under the same budget. It runs the real scheduler, so preemption and
+admission headroom are included.
+
+### Decode profile
+`bench/profile_decode.py` fills 32 sequences with random prompts, runs one warm-up decode
+step, and profiles the next one with `torch.profiler`. The table reports each op's share
+of the listed ops only (the top 25 by self time), not of the whole step.
