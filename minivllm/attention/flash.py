@@ -21,6 +21,15 @@ class FlashBackend:
         v_cache: torch.Tensor,
         meta: AttentionMetadata,
     ) -> torch.Tensor:
+        if meta.is_decode_only:
+            return self._kernel(
+                q[:, None],
+                k_cache,
+                v_cache,
+                cache_seqlens=meta.context_lens_tensor,
+                block_table=meta.block_tables,
+                causal=True,
+            )[:, 0]
         out = torch.empty_like(q)
         decode_rows = [i for i, n in enumerate(meta.query_lens) if n == 1]
         starts = torch.tensor([0] + meta.query_lens, device=q.device).cumsum(0)[:-1]
