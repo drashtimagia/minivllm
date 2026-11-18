@@ -81,3 +81,12 @@ class RequestOutput:
     new_token_ids: list[int]
     finished: bool
     finish_reason: str | None
+
+
+@dataclass(frozen=True)
+class EngineStats:
+    num_running: int
+    num_waiting: int
+    num_blocks: int
+    num_free_blocks: int
+    prefix_hit_rate: float

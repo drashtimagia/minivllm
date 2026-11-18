@@ -11,7 +11,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+server = ["fastapi", "uvicorn", "prometheus_client"]
+test = ["pytest", "openai", "httpx"]
 
 [build-system]
 requires = ["setuptools>=68"]

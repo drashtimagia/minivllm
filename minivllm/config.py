@@ -40,6 +40,14 @@ class EngineConfig:
         default="naive",
         metadata={"help": "naive: gather + SDPA; flash: flash_attn_with_kvcache (CUDA)", "choices": ["naive", "flash"]},
     )
+    host: str = field(default="127.0.0.1", metadata={"help": "server bind address"})
+    port: int = field(default=8000, metadata={"help": "server port"})
+    served_model_name: str = field(
+        default="", metadata={"help": "model id reported by the API; defaults to --model"}
+    )
+    disconnect_poll_interval_s: float = field(
+        default=0.5, metadata={"help": "how often a waiting request checks that its client is still connected"}
+    )
     max_num_seqs: int = field(default=16, metadata={"help": "max sequences in one batch"})
     max_num_batched_tokens: int = field(
         default=4096, metadata={"help": "max prompt tokens prefilled in one step"}

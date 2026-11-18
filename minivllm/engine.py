@@ -5,7 +5,7 @@ from minivllm.config import EngineConfig
 from minivllm.model_files import LoadedModel, load_model
 from minivllm.model_runner import ModelRunner
 from minivllm.scheduler import Scheduler
-from minivllm.sequence import RequestOutput, SamplingParams, Sequence
+from minivllm.sequence import EngineStats, RequestOutput, SamplingParams, Sequence
 from minivllm.static_batch import StaticEngine
 from minivllm.validation import check_prompt_fits
 
@@ -33,6 +33,16 @@ class Engine:
     def has_unfinished_requests(self) -> bool:
         return self.scheduler.has_unfinished()
 
+    def stats(self) -> EngineStats:
+        bm = self.scheduler.block_manager
+        return EngineStats(
+            num_running=len(self.scheduler.running),
+            num_waiting=len(self.scheduler.waiting),
+            num_blocks=bm.num_blocks,
+            num_free_blocks=bm.num_free_blocks,
+            prefix_hit_rate=bm.hit_rate,
+        )
+
     def step(self) -> list[RequestOutput]:
         sched = self.scheduler.schedule()
         if sched is None:
@@ -49,7 +59,10 @@ class Engine:
         return outputs
 
 
-def create_engine(config: EngineConfig) -> Engine | StaticEngine:
+AnyEngine = Engine | StaticEngine
+
+
+def create_engine(config: EngineConfig) -> AnyEngine:
     loaded = load_model(config)
     if config.scheduler == "static":
         return StaticEngine(config, loaded)
@@ -57,7 +70,7 @@ def create_engine(config: EngineConfig) -> Engine | StaticEngine:
 
 
 def generate(
-    engine: Engine | StaticEngine, prompts: list[list[int]], params: list[SamplingParams]
+    engine: AnyEngine, prompts: list[list[int]], params: list[SamplingParams]
 ) -> list[list[int]]:
     """Offline helper: submit every prompt, step until all finish, return outputs in order."""
     ids = [f"offline-{i}" for i in range(len(prompts))]

@@ -7,7 +7,7 @@ from minivllm.kv_cache import PaddedKVCache
 from minivllm.model_files import LoadedModel
 from minivllm.models.qwen2 import Qwen2ForCausalLM
 from minivllm.sampler import sample
-from minivllm.sequence import RequestOutput, SamplingParams
+from minivllm.sequence import EngineStats, RequestOutput, SamplingParams
 from minivllm.validation import check_prompt_fits
 
 
@@ -149,6 +149,11 @@ class StaticEngine:
 
     def has_unfinished_requests(self) -> bool:
         return bool(self.waiting) or self.batch is not None
+
+    def stats(self) -> EngineStats:
+        running = 0 if self.batch is None else sum(not f for f in self.batch.finished)
+        # The static baseline has no block pool, so it reports an empty one.
+        return EngineStats(running, len(self.waiting), 0, 0, 0.0)
 
     def step(self) -> list[RequestOutput]:
         if self.batch is None:
