@@ -1,0 +1,45 @@
+import argparse
+import dataclasses
+from dataclasses import dataclass, field
+from typing import Any
+
+import torch
+
+DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
+
+
+@dataclass(frozen=True)
+class EngineConfig:
+    model: str = field(
+        default="Qwen/Qwen2.5-0.5B-Instruct",
+        metadata={"help": "Hugging Face repo id or local checkpoint directory"},
+    )
+    dtype: str = field(
+        default="float32", metadata={"help": "weight and activation dtype", "choices": list(DTYPES)}
+    )
+    device: str = field(default="cpu", metadata={"help": "torch device, e.g. cpu or cuda"})
+    max_model_len: int = field(
+        default=2048, metadata={"help": "max prompt plus generated tokens per sequence"}
+    )
+    seed: int = field(default=0, metadata={"help": "seed for the sampling generator"})
+
+    @property
+    def torch_dtype(self) -> torch.dtype:
+        return DTYPES[self.dtype]
+
+    @classmethod
+    def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
+        for f in dataclasses.fields(cls):
+            flag = "--" + f.name.replace("_", "-")
+            kwargs: dict[str, Any] = {"default": f.default, "help": f.metadata["help"]}
+            if f.type is bool:
+                kwargs["action"] = argparse.BooleanOptionalAction
+            else:
+                kwargs["type"] = f.type
+                if "choices" in f.metadata:
+                    kwargs["choices"] = f.metadata["choices"]
+            parser.add_argument(flag, **kwargs)
+
+    @classmethod
+    def from_cli_args(cls, args: argparse.Namespace) -> "EngineConfig":
+        return cls(**{f.name: getattr(args, f.name) for f in dataclasses.fields(cls)})
