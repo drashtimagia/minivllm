@@ -1,5 +1,6 @@
 import time
 
+from minivllm.block_manager import BlockManager
 from minivllm.config import EngineConfig
 from minivllm.model_files import LoadedModel, load_model
 from minivllm.model_runner import ModelRunner
@@ -16,8 +17,9 @@ class Engine:
         self.config = config
         self.tokenizer = loaded.tokenizer
         self.eos_token_ids = loaded.eos_token_ids
-        self.scheduler = Scheduler(config.max_num_seqs, config.max_num_batched_tokens)
         self.runner = ModelRunner(config, loaded.model)
+        block_manager = BlockManager(self.runner.num_blocks, config.block_size)
+        self.scheduler = Scheduler(block_manager, config.max_num_seqs, config.max_num_batched_tokens)
 
     def add_request(self, request_id: str, prompt_token_ids: list[int], params: SamplingParams) -> None:
         check_prompt_fits(prompt_token_ids, self.config.max_model_len)

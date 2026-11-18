@@ -29,6 +29,14 @@ class EngineConfig:
             "choices": ["static", "continuous"],
         },
     )
+    block_size: int = field(default=16, metadata={"help": "tokens per KV cache block"})
+    kv_budget_gb: float = field(
+        default=1.0, metadata={"help": "memory for the paged KV cache, in GB (1e9 bytes)"}
+    )
+    attention_backend: str = field(
+        default="naive",
+        metadata={"help": "naive: gather + SDPA; flash: flash_attn_with_kvcache (CUDA)", "choices": ["naive", "flash"]},
+    )
     max_num_seqs: int = field(default=16, metadata={"help": "max sequences in one batch"})
     max_num_batched_tokens: int = field(
         default=4096, metadata={"help": "max prompt tokens prefilled in one step"}

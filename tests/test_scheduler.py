@@ -1,27 +1,42 @@
 import random
 
+from minivllm.block_manager import BlockManager
 from minivllm.scheduler import Scheduler
 from minivllm.sequence import SamplingParams, Sequence, SequenceStatus
 
 EOS = frozenset({0})
 MAX_LEN = 1000
+BLOCK_SIZE = 4
 
 
 def _seq(request_id: str, prompt_len: int = 4, max_tokens: int = 8) -> Sequence:
     return Sequence(request_id, [1] * prompt_len, SamplingParams(max_tokens=max_tokens), 0.0)
 
 
+def _scheduler(num_blocks: int = 64, max_num_seqs: int = 4, budget: int = 100) -> Scheduler:
+    return Scheduler(BlockManager(num_blocks, BLOCK_SIZE), max_num_seqs, budget)
+
+
 def _run_step(scheduler: Scheduler) -> None:
     sched = scheduler.schedule()
-    assert sched is not None
-    for seq in sched.seqs:
-        seq.num_computed_tokens = seq.num_tokens
-        seq.append_token(5, EOS, MAX_LEN)
+    if sched is not None:
+        for seq in sched.seqs:
+            seq.num_computed_tokens = seq.num_tokens
+            seq.append_token(5, EOS, MAX_LEN)
     scheduler.free_finished()
 
 
+def _assert_blocks_consistent(scheduler: Scheduler) -> None:
+    bm = scheduler.block_manager
+    assert set(bm.block_tables) == {s.request_id for s in scheduler.running}
+    owned = [b for t in bm.block_tables.values() for b in t]
+    assert sorted(owned + list(bm.free_blocks)) == list(range(bm.num_blocks))
+    for seq in scheduler.running:
+        assert len(bm.block_tables[seq.request_id]) >= bm.blocks_needed(seq.num_computed_tokens)
+
+
 def test_admits_up_to_max_num_seqs() -> None:
-    scheduler = Scheduler(max_num_seqs=2, max_num_batched_tokens=100)
+    scheduler = _scheduler(max_num_seqs=2)
     for i in range(3):
         scheduler.add(_seq(f"r{i}"))
     sched = scheduler.schedule()
@@ -31,7 +46,7 @@ def test_admits_up_to_max_num_seqs() -> None:
 
 
 def test_prefill_respects_token_budget() -> None:
-    scheduler = Scheduler(max_num_seqs=8, max_num_batched_tokens=10)
+    scheduler = _scheduler(max_num_seqs=8, budget=10)
     for i in range(3):
         scheduler.add(_seq(f"r{i}", prompt_len=4))
     sched = scheduler.schedule()
@@ -40,7 +55,7 @@ def test_prefill_respects_token_budget() -> None:
 
 
 def test_prefill_has_priority_over_decode() -> None:
-    scheduler = Scheduler(max_num_seqs=4, max_num_batched_tokens=100)
+    scheduler = _scheduler()
     scheduler.add(_seq("a"))
     _run_step(scheduler)
     scheduler.add(_seq("b"))
@@ -49,19 +64,37 @@ def test_prefill_has_priority_over_decode() -> None:
     assert [s.request_id for s in sched.seqs] == ["b"]
 
 
-def test_decode_runs_all_running() -> None:
-    scheduler = Scheduler(max_num_seqs=4, max_num_batched_tokens=100)
-    for i in range(3):
-        scheduler.add(_seq(f"r{i}"))
+def test_decode_grows_block_table_at_boundary() -> None:
+    scheduler = _scheduler()
+    scheduler.add(_seq("a", prompt_len=BLOCK_SIZE))
     _run_step(scheduler)
     sched = scheduler.schedule()
     assert sched is not None and not sched.is_prefill
-    assert len(sched.seqs) == 3
-    assert len(set(sched.cache_slots)) == 3
+    assert len(sched.block_tables[0]) == 2
 
 
-def test_abort_waiting_and_running_frees_slots() -> None:
-    scheduler = Scheduler(max_num_seqs=1, max_num_batched_tokens=100)
+def test_preempts_most_recently_admitted_and_requeues_it_first() -> None:
+    scheduler = _scheduler(num_blocks=4, max_num_seqs=3)
+    for name in "ab":
+        scheduler.add(_seq(name, prompt_len=BLOCK_SIZE, max_tokens=100))
+    for _ in range(20):
+        _run_step(scheduler)
+        if scheduler.num_preemptions:
+            break
+    # Two sequences cannot both outgrow two blocks each in a 4 block pool: b, the later
+    # admission, is the one that goes, and a keeps its blocks.
+    assert scheduler.num_preemptions == 1
+    assert [s.request_id for s in scheduler.running] == ["a"]
+    b = scheduler.waiting[0]
+    assert b.request_id == "b"
+    assert b.status is SequenceStatus.WAITING and b.num_computed_tokens == 0
+    assert b.output_token_ids, "generated tokens are kept for the recompute prefill"
+    assert "b" not in scheduler.block_manager.block_tables
+    _assert_blocks_consistent(scheduler)
+
+
+def test_abort_frees_blocks() -> None:
+    scheduler = _scheduler(max_num_seqs=1)
     scheduler.add(_seq("run"))
     scheduler.add(_seq("wait"))
     _run_step(scheduler)
@@ -69,28 +102,28 @@ def test_abort_waiting_and_running_frees_slots() -> None:
     seq = scheduler.abort("run")
     assert seq is not None and seq.status is SequenceStatus.FINISHED_ABORTED
     assert not scheduler.has_unfinished()
-    assert scheduler.free_slots == [0]
+    assert scheduler.block_manager.num_free_blocks == 64
     assert scheduler.abort("missing") is None
 
 
-def test_randomized_add_step_abort_never_leaks_slots() -> None:
+def test_randomized_add_step_abort_never_leaks_blocks() -> None:
     rng = random.Random(0)
-    max_num_seqs = 6
-    scheduler = Scheduler(max_num_seqs=max_num_seqs, max_num_batched_tokens=64)
+    scheduler = _scheduler(num_blocks=24, max_num_seqs=6, budget=64)
     next_id = 0
     for _ in range(5000):
         op = rng.random()
         if op < 0.3:
-            scheduler.add(_seq(f"r{next_id}", rng.randint(1, 30), rng.randint(1, 10)))
+            scheduler.add(_seq(f"r{next_id}", rng.randint(1, 30), rng.randint(1, 30)))
             next_id += 1
         elif op < 0.4 and next_id:
             scheduler.abort(f"r{rng.randrange(next_id)}")
         elif scheduler.has_unfinished():
             _run_step(scheduler)
-        slots = [scheduler.slot_of[s.request_id] for s in scheduler.running]
-        assert len(slots) == len(set(slots))
-        assert sorted(slots + scheduler.free_slots) == list(range(max_num_seqs))
-    while scheduler.has_unfinished():
+        _assert_blocks_consistent(scheduler)
+    for _ in range(100_000):
+        if not scheduler.has_unfinished():
+            break
         _run_step(scheduler)
-    assert sorted(scheduler.free_slots) == list(range(max_num_seqs))
-    assert not scheduler.slot_of
+    assert not scheduler.has_unfinished()
+    assert scheduler.block_manager.num_free_blocks == 24
+    assert scheduler.num_preemptions > 0

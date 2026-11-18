@@ -84,3 +84,49 @@ what Phase 4's paging removes.
 ### Engine and StaticEngine share one interface
 Both expose add_request, abort_request, step, has_unfinished_requests, so the offline
 helper, tests and benchmarks switch between them with `--scheduler`.
+
+## Phase 4: paged KV cache
+
+### Block size 16
+Block size trades internal fragmentation against table size and gather overhead. A
+sequence wastes on average half a block, so 16 wastes about 8 tokens per sequence, small
+next to hundreds of tokens, while keeping block tables short. 16 is also vLLM's default.
+It is a flag (`--block-size`). The naive backend works with any size. Whether
+`flash_attn_with_kvcache` accepts a page size of 16 depends on the installed flash-attn
+version; this has not been checked on a GPU yet, and the flash backend leaves that
+error to the kernel.
+
+### Slot mapping
+A layer's pool is `[num_blocks, block_size, kv_heads, head_dim]`. Token at position p of
+a sequence is stored in block `table[p // block_size]` at offset `p % block_size`.
+Viewing the pool as `[num_blocks * block_size, ...]` makes that one flat index,
+`block_id * block_size + offset`. The model runner builds a `slot_mapping` of those
+indices for the step's new tokens, and the cache writes keys and values with a single
+scatter per layer. Attention reads through the block tables (gather for naive, directly
+in the kernel for flash).
+
+### Preemption: recompute, most recently admitted first
+When a decode step cannot give every running sequence the block it needs, the last
+sequence in the running list (the most recently admitted) is freed and put at the front
+of the waiting queue. Its generated tokens are kept, so on readmission one prefill over
+prompt plus output rebuilds the cache. The oldest sequences keep their progress, so the
+system always advances. Alternative: swapping blocks to CPU memory, which avoids
+recompute but needs a second block pool and copy engine; recompute is simpler and is
+vLLM's default for single-sequence requests.
+
+### Admission headroom
+A waiting sequence is admitted only if its blocks plus one spare block per running
+sequence are free. Without it, a fresh admission takes the last free blocks, the next
+decode step cannot grow the older sequences, and the new sequence is preempted
+immediately, repeating every step.
+
+### Memory budget
+`--kv-budget-gb` sets the pool size; the number of blocks is the budget divided by the
+bytes of one block across all layers (keys and values). The engine refuses to start if
+the pool cannot hold one `max_model_len` sequence, since such a sequence could never
+finish. Setting a tiny budget on a small model is how tests force preemption.
+
+### One model forward path for all cache types
+The model only calls `kv_cache.attend(layer, q, k, v)`. `PaddedKVCache` (static baseline)
+and `PagedKVCache` implement it; the attention backend (naive or flash) sits behind the
+paged cache and receives the pool, the block tables and the step layout.

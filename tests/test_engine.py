@@ -1,7 +1,9 @@
 import pytest
+import torch
 
 from minivllm.config import EngineConfig
 from minivllm.engine import Engine, generate
+from minivllm.kv_cache import kv_bytes_per_block
 from minivllm.model_files import LoadedModel
 from minivllm.sequence import RequestOutput, SamplingParams
 from tests.conftest import TEST_MODEL
@@ -9,11 +11,21 @@ from tests.conftest import TEST_MODEL
 SHORT = 16
 GREEDY_SHORT = SamplingParams(temperature=0.0, max_tokens=SHORT)
 SUBSET = [0, 2, 7, 13, 17, 19]
+SHORT_PROMPTS = [0, 1, 2, 3, 4, 5, 6, 9]
 
 
-def _engine(loaded: LoadedModel, max_num_seqs: int = 16) -> Engine:
+def _engine(loaded: LoadedModel, max_num_seqs: int = 16, num_blocks: int | None = None) -> Engine:
+    mc = loaded.model.config
+    budget = 1.0
+    if num_blocks is not None:
+        per_block = kv_bytes_per_block(mc.num_hidden_layers, 16, mc.num_key_value_heads, mc.head_dim, torch.float32)
+        budget = (num_blocks + 0.5) * per_block / 1e9
     config = EngineConfig(
-        model=TEST_MODEL, max_model_len=1024, max_num_batched_tokens=2048, max_num_seqs=max_num_seqs
+        model=TEST_MODEL,
+        max_model_len=1024 if num_blocks is None else 128,
+        max_num_batched_tokens=2048 if num_blocks is None else 128,
+        max_num_seqs=max_num_seqs,
+        kv_budget_gb=budget,
     )
     return Engine(config, loaded)
 
@@ -57,8 +69,9 @@ def test_abort_mid_generation_frees_everything(
     for request_id in running + waiting:
         assert engine.abort_request(request_id)
     assert not engine.has_unfinished_requests()
-    assert sorted(engine.scheduler.free_slots) == list(range(2))
-    assert not engine.scheduler.slot_of
+    bm = engine.scheduler.block_manager
+    assert bm.num_free_blocks == bm.num_blocks
+    assert not bm.block_tables
     assert engine.step() == []
     assert all(len(tokens) < 200 for tokens in outputs.values())
 
@@ -76,3 +89,19 @@ def test_batched_outputs_equal_each_request_alone(
 def test_rejects_prompts_that_cannot_generate(loaded: LoadedModel, bad_len: int) -> None:
     with pytest.raises(ValueError):
         _engine(loaded).add_request("x", [1] * bad_len, GREEDY_SHORT)
+
+
+def test_preemption_under_tiny_budget_still_matches_hf(
+    loaded: LoadedModel, prompt_ids: list[list[int]], hf_outputs: list[list[int]]
+) -> None:
+    engine = _engine(loaded, num_blocks=12)
+    for i in SHORT_PROMPTS:
+        engine.add_request(str(i), prompt_ids[i], GREEDY_SHORT)
+    outputs: dict[str, list[int]] = {}
+    while engine.has_unfinished_requests():
+        _collect(outputs, engine.step())
+    assert engine.scheduler.num_preemptions > 0
+    for i in SHORT_PROMPTS:
+        assert outputs[str(i)] == hf_outputs[i][:SHORT], f"prompt {i}"
+    bm = engine.scheduler.block_manager
+    assert bm.num_free_blocks == bm.num_blocks
