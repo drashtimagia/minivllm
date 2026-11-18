@@ -20,6 +20,9 @@ class AttentionMetadata:
     # [num_seqs], int32: context_lens as a tensor, which the flash kernel takes.
     context_lens_tensor: torch.Tensor
     block_size: int
+    # Every query is a single token, so attention reduces to one batched kernel call
+    # that reads only the tensors above; this is the shape CUDA graphs can capture.
+    is_decode_only: bool = False
 
 
 class AttentionBackend(Protocol):

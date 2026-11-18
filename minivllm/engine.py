@@ -21,7 +21,9 @@ class Engine:
         block_manager = BlockManager(
             self.runner.num_blocks, config.block_size, config.enable_prefix_caching
         )
-        self.scheduler = Scheduler(block_manager, config.max_num_seqs, config.max_num_batched_tokens)
+        self.scheduler = Scheduler(
+            block_manager, config.max_num_seqs, config.max_num_batched_tokens, config.enable_chunked_prefill
+        )
 
     def add_request(self, request_id: str, prompt_token_ids: list[int], params: SamplingParams) -> None:
         check_prompt_fits(prompt_token_ids, self.config.max_model_len)
@@ -49,9 +51,11 @@ class Engine:
             return []
         tokens = self.runner.execute(sched)
         outputs = []
-        for seq, token in zip(sched.seqs, tokens, strict=True):
-            seq.num_computed_tokens = seq.num_tokens
+        for seq, n, token in zip(sched.seqs, sched.num_scheduled_tokens, tokens, strict=True):
+            seq.num_computed_tokens += n
             self.scheduler.register_computed(seq)
+            if token is None:
+                continue
             seq.append_token(token, self.eos_token_ids, self.config.max_model_len)
             reason = seq.status.value if seq.finished else None
             outputs.append(RequestOutput(seq.request_id, [token], seq.finished, reason))

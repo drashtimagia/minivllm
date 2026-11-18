@@ -19,6 +19,7 @@ def _engine(
     max_num_seqs: int = 16,
     num_blocks: int | None = None,
     prefix_caching: bool = False,
+    chunk_budget: int | None = None,
 ) -> Engine:
     mc = loaded.model.config
     budget = 1.0
@@ -28,7 +29,8 @@ def _engine(
     config = EngineConfig(
         model=TEST_MODEL,
         max_model_len=1024 if num_blocks is None else 128,
-        max_num_batched_tokens=2048 if num_blocks is None else 128,
+        max_num_batched_tokens=chunk_budget or (2048 if num_blocks is None else 128),
+        enable_chunked_prefill=chunk_budget is not None,
         max_num_seqs=max_num_seqs,
         kv_budget_gb=budget,
         enable_prefix_caching=prefix_caching,

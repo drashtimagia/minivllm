@@ -48,6 +48,15 @@ class EngineConfig:
     disconnect_poll_interval_s: float = field(
         default=0.5, metadata={"help": "how often a waiting request checks that its client is still connected"}
     )
+    enable_chunked_prefill: bool = field(
+        default=False, metadata={"help": "split long prompts into chunks that share a step with decodes"}
+    )
+    enable_cuda_graphs: bool = field(
+        default=False, metadata={"help": "replay captured CUDA graphs for decode steps (needs cuda and flash)"}
+    )
+    cuda_graph_max_batch_size: int = field(
+        default=64, metadata={"help": "largest decode batch that has a captured graph"}
+    )
     max_num_seqs: int = field(default=16, metadata={"help": "max sequences in one batch"})
     max_num_batched_tokens: int = field(
         default=4096, metadata={"help": "max prompt tokens prefilled in one step"}
@@ -56,11 +65,19 @@ class EngineConfig:
     def __post_init__(self) -> None:
         # Without chunked prefill a prompt is prefilled in one step, so the per-step
         # token budget must fit the longest allowed prompt or that prompt never runs.
-        if self.max_num_batched_tokens < self.max_model_len:
+        if not self.enable_chunked_prefill and self.max_num_batched_tokens < self.max_model_len:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must be >= "
-                f"max_model_len ({self.max_model_len})"
+                f"max_model_len ({self.max_model_len}) unless --enable-chunked-prefill is set"
             )
+        # Every running sequence needs one token of budget per step to decode.
+        if self.enable_chunked_prefill and self.max_num_batched_tokens < self.max_num_seqs:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must be >= "
+                f"max_num_seqs ({self.max_num_seqs}) with chunked prefill"
+            )
+        if self.enable_cuda_graphs and not (self.device.startswith("cuda") and self.attention_backend == "flash"):
+            raise ValueError("--enable-cuda-graphs needs --device cuda and --attention-backend flash")
 
     @property
     def torch_dtype(self) -> torch.dtype:

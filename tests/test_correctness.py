@@ -34,6 +34,14 @@ def test_continuous_batching_matches_hf(
     assert_matches_hf(generate(engine, prompt_ids, [GREEDY] * len(prompt_ids)), hf_outputs)
 
 
+def test_chunked_prefill_matches_hf(
+    loaded: LoadedModel, prompt_ids: list[list[int]], hf_outputs: list[list[int]]
+) -> None:
+    config = dataclasses.replace(BASE_CONFIG, enable_chunked_prefill=True, max_num_batched_tokens=256)
+    engine = Engine(config, loaded)
+    assert_matches_hf(generate(engine, prompt_ids, [GREEDY] * len(prompt_ids)), hf_outputs)
+
+
 def assert_matches_hf(outputs: list[list[int]], reference: list[list[int]]) -> None:
     mismatches = [
         f"{PROMPTS[i].name}: {_first_divergence(ours, ref)}"

@@ -127,3 +127,69 @@ def test_randomized_add_step_abort_never_leaks_blocks() -> None:
     assert not scheduler.has_unfinished()
     assert scheduler.block_manager.num_free_blocks == 24
     assert scheduler.num_preemptions > 0
+
+
+def _chunked_scheduler(num_blocks: int = 64, max_num_seqs: int = 4, budget: int = 8) -> Scheduler:
+    return Scheduler(BlockManager(num_blocks, BLOCK_SIZE), max_num_seqs, budget, enable_chunked_prefill=True)
+
+
+def _run_chunked_step(scheduler: Scheduler) -> list[tuple[str, int]]:
+    sched = scheduler.schedule()
+    if sched is None:
+        return []
+    assert sum(sched.num_scheduled_tokens) <= scheduler.max_num_batched_tokens
+    for seq, n in zip(sched.seqs, sched.num_scheduled_tokens):
+        seq.num_computed_tokens += n
+        if seq.num_computed_tokens == seq.num_tokens:
+            seq.append_token(5, EOS, MAX_LEN)
+    scheduler.free_finished()
+    return [(s.request_id, n) for s, n in zip(sched.seqs, sched.num_scheduled_tokens)]
+
+
+def test_chunked_prefill_splits_a_long_prompt_across_steps() -> None:
+    scheduler = _chunked_scheduler(budget=8)
+    scheduler.add(_seq("long", prompt_len=30, max_tokens=2))
+    steps = [_run_chunked_step(scheduler) for _ in range(4)]
+    assert steps == [[("long", 8)], [("long", 8)], [("long", 8)], [("long", 6)]]
+    seq = scheduler.running[0]
+    assert len(seq.output_token_ids) == 1, "only the last chunk samples a token"
+
+
+def test_decode_shares_a_step_with_a_prompt_chunk() -> None:
+    scheduler = _chunked_scheduler(budget=8)
+    scheduler.add(_seq("a", prompt_len=4, max_tokens=50))
+    _run_chunked_step(scheduler)
+    scheduler.add(_seq("b", prompt_len=30))
+    step = _run_chunked_step(scheduler)
+    assert step == [("a", 1), ("b", 7)], "the decode goes first and the chunk takes the rest"
+
+
+def test_prefill_first_would_have_stalled_that_decode() -> None:
+    scheduler = Scheduler(BlockManager(64, BLOCK_SIZE), 4, 100)
+    scheduler.add(_seq("a", prompt_len=4, max_tokens=50))
+    _run_step(scheduler)
+    scheduler.add(_seq("b", prompt_len=30))
+    sched = scheduler.schedule()
+    assert sched is not None and [s.request_id for s in sched.seqs] == ["b"]
+
+
+def test_chunked_randomized_never_leaks_and_respects_budget() -> None:
+    rng = random.Random(7)
+    scheduler = _chunked_scheduler(num_blocks=24, max_num_seqs=6, budget=12)
+    next_id = 0
+    for _ in range(5000):
+        op = rng.random()
+        if op < 0.3:
+            scheduler.add(_seq(f"r{next_id}", rng.randint(1, 40), rng.randint(1, 20)))
+            next_id += 1
+        elif op < 0.4 and next_id:
+            scheduler.abort(f"r{rng.randrange(next_id)}")
+        else:
+            _run_chunked_step(scheduler)
+        _assert_blocks_consistent(scheduler)
+    for _ in range(100_000):
+        if not scheduler.has_unfinished():
+            break
+        _run_chunked_step(scheduler)
+    assert not scheduler.has_unfinished()
+    assert scheduler.block_manager.num_free_blocks == 24
