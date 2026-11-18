@@ -284,3 +284,64 @@ admission headroom are included.
 `bench/profile_decode.py` fills 32 sequences with random prompts, runs one warm-up decode
 step, and profiles the next one with `torch.profiler`. The table reports each op's share
 of the listed ops only (the top 25 by self time), not of the whole step.
+
+## Phase 8: chunked prefill and CUDA graphs
+
+### Status
+Chunked prefill is implemented and tested on CPU, including token-for-token agreement
+with HF on all 20 prompts. The CUDA graph decode path is written but has never run: it
+needs a GPU and flash-attn, and its only test (`test_graph_decode_matches_eager_decode`)
+is skipped without one. The before/after benchmark scripts exist (`bench/run_phase8.sh`)
+but have not been run, so `bench/results/` holds no Phase 8 numbers and the phase gate's
+"before/after numbers are in bench/results" is open.
+
+### Chunked prefill: a step spends a token budget
+With `--enable-chunked-prefill`, a step spends `--max-num-batched-tokens` in this order:
+one token for every running sequence that is decoding, a chunk of the remaining prompt
+for every running sequence still prefilling, then new admissions with what is left.
+Decodes are never behind a prompt, which removes the stall prefill-first scheduling
+causes whenever a long prompt arrives. Prefill-first remains the default.
+Alternative: a fixed chunk size per prompt. A shared budget bounds the work per step
+whatever the mix is, which is what keeps step time predictable.
+
+### Blocks are still reserved for the whole prompt at admission
+Chunking changes when tokens are computed, not when blocks are reserved. Reserving
+everything up front means a half-prefilled sequence can never fail to get a block
+mid-prompt, so only decode growth can trigger preemption, as before.
+
+### A sequence samples only when its chunk reaches its last token
+The model runner builds attention for each chunk against the context up to the end of
+that chunk, runs the vocabulary projection only for sequences whose chunk finished
+their tokens, and returns no token for the rest. A one-token decode is the same case
+with a chunk of one. A preempted sequence restarts at zero computed tokens and goes
+through the same path.
+
+### Prefix caching interacts cleanly
+Full blocks are registered after every chunk, so a later request can hit the part of a
+long prompt that is already computed. This is tested together with preemption.
+
+### Budget validation
+Without chunking the budget must cover the longest prompt. With chunking it only has to
+cover one token per running sequence, otherwise some decodes would never be scheduled.
+
+### CUDA graphs: decode only, fixed batch-size buckets
+A graph replays recorded kernel launches on fixed addresses, so it needs fixed shapes.
+Decode batches are padded to the smallest bucket (powers of two up to
+`--cuda-graph-max-batch-size`) and replayed. Any step that contains a prompt chunk, or
+a batch larger than the biggest bucket, runs eagerly. The graph covers the model and the
+vocabulary projection; sampling stays outside.
+
+### Padding rows write to a scratch block
+A padded row still runs, so it still writes a key and value. The pool gets one extra
+block, outside the block manager's range, and padded rows read and write only that
+block. The padding arithmetic is pure Python and unit tested on CPU.
+
+### Decode-only attention reads only tensors
+The flash backend has a path for batches where every query is one token that makes one
+batched kernel call from tensors alone. Graph capture needs that, and the eager path
+uses it too.
+
+### Known risks of the unrun graph path
+Whether `flash_attn_with_kvcache` is safe to capture with its default split heuristics,
+and whether it accepts block size 16, are both unchecked. If capture fails or outputs
+differ from eager, `test_graph_decode_matches_eager_decode` is the first thing to run.

@@ -32,6 +32,19 @@ def test_minivllm_server_commands_differ_only_where_the_system_differs() -> None
     assert _flag_value(prefix, "--kv-budget-gb") == _flag_value(paged, "--kv-budget-gb")
 
 
+def test_phase_8_systems_differ_from_paged_only_by_their_flag() -> None:
+    args = _args("--chunk-budget", "1024")
+    paged = serve_bench.build_server_cmd("paged", args)
+    chunked = serve_bench.build_server_cmd("paged_chunked", args)
+    graphs = serve_bench.build_server_cmd("paged_graphs", args)
+    both = serve_bench.build_server_cmd("paged_chunked_graphs", args)
+    assert "--enable-chunked-prefill" in chunked and "--enable-cuda-graphs" not in chunked
+    assert "--enable-cuda-graphs" in graphs and "--enable-chunked-prefill" not in graphs
+    assert "--enable-chunked-prefill" in both and "--enable-cuda-graphs" in both
+    assert _flag_value(chunked, "--max-num-batched-tokens") == "1024"
+    assert _flag_value(graphs, "--max-num-batched-tokens") == _flag_value(paged, "--max-num-batched-tokens")
+
+
 def test_vllm_gets_the_same_block_pool_as_the_budget_implies() -> None:
     args = _args("--kv-budget-gb", "0.5")
     cmd = serve_bench.build_server_cmd("vllm_eager", args)

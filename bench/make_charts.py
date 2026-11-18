@@ -10,7 +10,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 from bench.common import RESULTS_DIR, load_results, of_kind, rate_key, serving_series  # noqa: E402
 from bench.serve_bench import SYSTEMS  # noqa: E402
 
-COLORS = dict(zip(SYSTEMS, ["#7f7f7f", "#1f77b4", "#2ca02c", "#17becf", "#d62728", "#ff7f0e", "#9467bd"]))
+COLORS = dict(
+    zip(
+        SYSTEMS,
+        ["#7f7f7f", "#1f77b4", "#2ca02c", "#17becf", "#bcbd22", "#8c564b", "#e377c2", "#d62728", "#ff7f0e", "#9467bd"],
+    )
+)
 INF_LABEL = "inf"
 
 

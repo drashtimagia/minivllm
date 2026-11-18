@@ -12,7 +12,10 @@ import torch
 
 from bench.common import RESULTS_DIR, kv_blocks_for_budget, write_result
 
-SYSTEMS = ("static", "continuous", "paged", "paged_prefix", "vllm", "vllm_eager", "vllm_prefix")
+SYSTEMS = (
+    "static", "continuous", "paged", "paged_prefix", "paged_chunked", "paged_graphs", "paged_chunked_graphs",
+    "vllm", "vllm_eager", "vllm_prefix",
+)
 WORKLOADS = ("sharegpt", "agent")
 VLLM_BLOCK_SIZE = 16
 READY_TIMEOUT_S = 900
@@ -34,16 +37,24 @@ def build_server_cmd(system: str, args: argparse.Namespace) -> list[str]:
     # One block as large as a whole sequence is the contiguous reservation that
     # continuous batching used before paging was added.
     block_size = {"continuous": args.max_model_len}.get(system, VLLM_BLOCK_SIZE)
+    chunked = "chunked" in system
     cmd = [
         sys.executable, "-m", "minivllm.server", "--model", args.model, "--dtype", args.dtype,
         "--device", "cuda", "--port", str(args.port), "--served-model-name", args.model,
-        "--max-model-len", str(args.max_model_len), "--max-num-batched-tokens", str(args.max_model_len),
+        "--max-model-len", str(args.max_model_len),
+        "--max-num-batched-tokens", str(args.chunk_budget if chunked else args.max_model_len),
         "--max-num-seqs", str(args.max_num_seqs), "--kv-budget-gb", str(args.kv_budget_gb),
         "--block-size", str(block_size), "--attention-backend", "flash",
     ]
     if system == "static":
         return cmd + ["--scheduler", "static"]
-    return cmd + (["--enable-prefix-caching"] if system == "paged_prefix" else [])
+    flags = {
+        "paged_prefix": ["--enable-prefix-caching"],
+        "paged_chunked": ["--enable-chunked-prefill"],
+        "paged_graphs": ["--enable-cuda-graphs"],
+        "paged_chunked_graphs": ["--enable-chunked-prefill", "--enable-cuda-graphs"],
+    }
+    return cmd + flags.get(system, [])
 
 
 def build_client_cmd(workload: str, rate: str, args: argparse.Namespace, result_dir: Path) -> list[str]:
@@ -117,6 +128,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-num-seqs", type=int, default=64)
     p.add_argument("--kv-budget-gb", type=float, default=12.0)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    p.add_argument("--chunk-budget", type=int, default=2048, help="tokens per step for the chunked systems")
     p.add_argument("--output-len", type=int, default=128)
     p.add_argument("--num-prompts", type=int, default=500)
     p.add_argument("--dataset-path", help="ShareGPT json file (sharegpt workload)")
