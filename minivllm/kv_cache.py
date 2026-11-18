@@ -2,48 +2,61 @@ import torch
 import torch.nn.functional as F
 
 
-class ContiguousKVCache:
-    """KV cache for one sequence, reserved up front for max_len tokens."""
+class PaddedKVCache:
+    """KV cache for a static batch: one row per sequence, all rows advance together, and
+    each row is reserved up front for max_len tokens. Rows are left padded, so the cache
+    keeps a mask of which slots hold padding."""
 
     def __init__(
         self,
         num_layers: int,
+        batch_size: int,
         max_len: int,
         num_kv_heads: int,
         head_dim: int,
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
-        shape = (num_layers, max_len, num_kv_heads, head_dim)
+        shape = (num_layers, batch_size, max_len, num_kv_heads, head_dim)
         self.k = torch.zeros(shape, dtype=dtype, device=device)
         self.v = torch.zeros(shape, dtype=dtype, device=device)
+        self.is_real = torch.ones(batch_size, max_len, dtype=torch.bool, device=device)
+        self.batch_size = batch_size
         self.max_len = max_len
         self.num_cached = 0
+
+    def mark_padding(self, row: int, num_pad: int) -> None:
+        self.is_real[row, :num_pad] = False
 
     def attend(
         self, layer_idx: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        num_new = q.shape[0]
-        end = self.num_cached + num_new
+        num_tokens, num_heads, head_dim = q.shape
+        num_new = num_tokens // self.batch_size
+        start, end = self.num_cached, self.num_cached + num_new
         if end > self.max_len:
-            raise ValueError(f"sequence of {end} tokens exceeds KV cache capacity {self.max_len}")
-        if self.num_cached > 0 and num_new > 1:
-            raise ValueError("multi-token steps on top of a cached prefix are not supported")
-        self.k[layer_idx, self.num_cached : end] = k
-        self.v[layer_idx, self.num_cached : end] = v
-        keys = self.k[layer_idx, :end]
-        values = self.v[layer_idx, :end]
-        # SDPA wants [batch, heads, tokens, head_dim]. With no cached prefix the query and
-        # key ranges coincide, so the top-left aligned is_causal mask is exactly right; a
-        # single decode token may see every cached key, so it needs no mask at all.
+            raise ValueError(f"step needs {end} cache slots; capacity is {self.max_len}")
+        self.k[layer_idx, :, start:end] = k.view(self.batch_size, num_new, *k.shape[1:])
+        self.v[layer_idx, :, start:end] = v.view(self.batch_size, num_new, *v.shape[1:])
         out = F.scaled_dot_product_attention(
-            q.transpose(0, 1)[None],
-            keys.transpose(0, 1)[None],
-            values.transpose(0, 1)[None],
-            is_causal=self.num_cached == 0 and num_new > 1,
+            q.view(self.batch_size, num_new, num_heads, head_dim).transpose(1, 2),
+            self.k[layer_idx, :, :end].transpose(1, 2),
+            self.v[layer_idx, :, :end].transpose(1, 2),
+            attn_mask=self._mask(start, end),
             enable_gqa=True,
         )
-        return out[0].transpose(0, 1)
+        return out.transpose(1, 2).reshape(num_tokens, num_heads, head_dim)
+
+    def _mask(self, start: int, end: int) -> torch.Tensor:
+        query_pos = torch.arange(start, end, device=self.is_real.device)
+        key_pos = torch.arange(end, device=self.is_real.device)
+        causal = key_pos[None, :] <= query_pos[:, None]
+        allowed = causal[None] & self.is_real[:, None, :end]
+        # A padding query on the left edge has no real key to its left, and a row of all
+        # False makes softmax produce NaN. Letting each query see itself keeps the row
+        # finite; real queries already see themselves, and nothing reads padding outputs.
+        allowed[:, torch.arange(end - start), query_pos] = True
+        return allowed[:, None]
 
     def advance(self, num_tokens: int) -> None:
         self.num_cached += num_tokens

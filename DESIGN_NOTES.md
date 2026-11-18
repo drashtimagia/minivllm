@@ -45,3 +45,25 @@ sampled rows are scaled by temperature, filtered by top-p (smallest prefix whose
 reaches `top_p`, top token always kept), and drawn with `torch.multinomial` from one
 seeded generator. Alternative: per-request generators for reproducible seeds per request;
 not needed yet.
+
+## Phase 2: static batching baseline
+
+### Left padding with an explicit boolean mask
+Prompts are left padded so every row's last prompt token is in the same column; the
+logits for the whole batch are then one slice, and each decode step writes every row's
+new key and value into the same cache column. The mask combines causality with a
+per-row "is real token" mask over the cache. Pad positions get position id 0; their
+outputs are never read.
+Alternative: right padding. It keeps positions simple but scatters each row's next
+token to a different cache column, which complicates the lockstep decode.
+
+### Padding queries attend to themselves
+A pad query at the left edge has no real key at or before it, and a fully masked row
+makes softmax return NaN, which then propagates through the residual stream of that
+row. Allowing each query to see its own key keeps the row finite. Real queries already
+see themselves, so their output is unchanged.
+
+### The cache is sized per batch
+A static batch reserves `longest_prompt + max(max_tokens)` slots per row, all up front.
+That reservation, plus finished rows that keep running until the longest row is done,
+are the costs continuous batching and paging remove, which is why this path exists.

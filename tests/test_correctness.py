@@ -17,12 +17,24 @@ def generator(hf_outputs: list[list[int]]) -> Generator:
     return Generator(EngineConfig(model=TEST_MODEL, dtype="float32", device="cpu"))
 
 
-@pytest.mark.parametrize("index", range(len(PROMPTS)), ids=[p.name for p in PROMPTS])
-def test_single_request_matches_hf(
-    generator: Generator, prompt_ids: list[list[int]], hf_outputs: list[list[int]], index: int
+@pytest.mark.parametrize("batch_size", [1, 4, 16])
+def test_static_batch_matches_hf(
+    generator: Generator, prompt_ids: list[list[int]], hf_outputs: list[list[int]], batch_size: int
 ) -> None:
-    output = generator.generate(prompt_ids[index], GREEDY)
-    assert output == hf_outputs[index], _first_divergence(output, hf_outputs[index])
+    outputs: list[list[int]] = []
+    for start in range(0, len(prompt_ids), batch_size):
+        chunk = prompt_ids[start : start + batch_size]
+        outputs += generator.generate(chunk, [GREEDY] * len(chunk))
+    assert_matches_hf(outputs, hf_outputs)
+
+
+def assert_matches_hf(outputs: list[list[int]], reference: list[list[int]]) -> None:
+    mismatches = [
+        f"{PROMPTS[i].name}: {_first_divergence(ours, ref)}"
+        for i, (ours, ref) in enumerate(zip(outputs, reference, strict=True))
+        if ours != ref
+    ]
+    assert not mismatches, "\n".join(mismatches)
 
 
 def _first_divergence(ours: list[int], reference: list[int]) -> str:
