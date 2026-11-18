@@ -13,6 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 server = ["fastapi", "uvicorn", "prometheus_client"]
 test = ["pytest", "openai", "httpx"]
+bench = ["matplotlib"]
 
 [build-system]
 requires = ["setuptools>=68"]
