@@ -130,3 +130,48 @@ finish. Setting a tiny budget on a small model is how tests force preemption.
 The model only calls `kv_cache.attend(layer, q, k, v)`. `PaddedKVCache` (static baseline)
 and `PagedKVCache` implement it; the attention backend (naive or flash) sits behind the
 paged cache and receives the pool, the block tables and the step layout.
+
+## Phase 5: prefix caching
+
+### Hash chain over full blocks only
+A block is registered under `hash((parent_hash, block_tokens))`, where the parent hash
+is that of the previous block (None for the first). The hash therefore names the whole
+prefix up to and including the block, so two blocks with identical tokens but different
+histories never collide on purpose. Partial blocks are never registered: they are still
+being written. Python's built-in `hash` on a tuple of ints is a 64 bit value; an
+accidental collision would silently serve the wrong keys and values. vLLM offers sha256
+for that reason; the odds here are negligible for the workloads in this project, and a
+cryptographic hash is a one-line change in `_block_hash` if that ever matters.
+
+### The block holding the last token is always recomputed
+Matching stops before the block that contains a prompt's final token. Even a fully
+cached prompt must run one token through the model to produce logits to sample from, and
+recomputing the final block keeps the prefill code path identical for hits and misses.
+
+### Ref counts, and an LRU pool for blocks nobody is using
+A block shared by several sequences has a ref count above one. At zero it is not wiped:
+it moves to an ordered pool of cached free blocks and can still be matched by hash.
+Allocation takes never-used blocks first and only then evicts the oldest cached block,
+so eviction happens only when memory is needed and can never touch a block with a
+non-zero ref count. When a sequence is freed its blocks are released back to front, so
+the deepest part of a prefix is evicted before the shared start of it.
+
+### Registration happens after the step that computed the block
+Blocks are registered by the scheduler after the engine records a step's tokens as
+computed, never at admission. Two requests with the same new prefix admitted in the
+same step both compute it; the first to register wins and the other block stays
+private. Alternative: let the second wait for the first. That would add scheduling
+state for a rare case.
+
+### Preempted sequences get cache hits on themselves
+Preemption frees a sequence's blocks but their contents stay in the cached pool, so
+when it is readmitted its prompt blocks are usually still there and the recompute
+prefill covers only what was evicted in the meantime.
+
+### Token budget counts only uncached tokens
+`max_num_batched_tokens` limits the tokens actually run through the model in a prefill
+step, so a prefix hit lets more requests be admitted in the same step.
+
+### Hit rate
+The block manager counts prompt tokens it was asked to place and how many were served
+from the cache. Readmission after preemption is counted like any other admission.

@@ -18,7 +18,9 @@ class Engine:
         self.tokenizer = loaded.tokenizer
         self.eos_token_ids = loaded.eos_token_ids
         self.runner = ModelRunner(config, loaded.model)
-        block_manager = BlockManager(self.runner.num_blocks, config.block_size)
+        block_manager = BlockManager(
+            self.runner.num_blocks, config.block_size, config.enable_prefix_caching
+        )
         self.scheduler = Scheduler(block_manager, config.max_num_seqs, config.max_num_batched_tokens)
 
     def add_request(self, request_id: str, prompt_token_ids: list[int], params: SamplingParams) -> None:
@@ -39,6 +41,7 @@ class Engine:
         outputs = []
         for seq, token in zip(sched.seqs, tokens, strict=True):
             seq.num_computed_tokens = seq.num_tokens
+            self.scheduler.register_computed(seq)
             seq.append_token(token, self.eos_token_ids, self.config.max_model_len)
             reason = seq.status.value if seq.finished else None
             outputs.append(RequestOutput(seq.request_id, [token], seq.finished, reason))

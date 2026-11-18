@@ -14,7 +14,12 @@ SUBSET = [0, 2, 7, 13, 17, 19]
 SHORT_PROMPTS = [0, 1, 2, 3, 4, 5, 6, 9]
 
 
-def _engine(loaded: LoadedModel, max_num_seqs: int = 16, num_blocks: int | None = None) -> Engine:
+def _engine(
+    loaded: LoadedModel,
+    max_num_seqs: int = 16,
+    num_blocks: int | None = None,
+    prefix_caching: bool = False,
+) -> Engine:
     mc = loaded.model.config
     budget = 1.0
     if num_blocks is not None:
@@ -26,6 +31,7 @@ def _engine(loaded: LoadedModel, max_num_seqs: int = 16, num_blocks: int | None 
         max_num_batched_tokens=2048 if num_blocks is None else 128,
         max_num_seqs=max_num_seqs,
         kv_budget_gb=budget,
+        enable_prefix_caching=prefix_caching,
     )
     return Engine(config, loaded)
 
@@ -91,10 +97,11 @@ def test_rejects_prompts_that_cannot_generate(loaded: LoadedModel, bad_len: int)
         _engine(loaded).add_request("x", [1] * bad_len, GREEDY_SHORT)
 
 
+@pytest.mark.parametrize("prefix_caching", [False, True])
 def test_preemption_under_tiny_budget_still_matches_hf(
-    loaded: LoadedModel, prompt_ids: list[list[int]], hf_outputs: list[list[int]]
+    loaded: LoadedModel, prompt_ids: list[list[int]], hf_outputs: list[list[int]], prefix_caching: bool
 ) -> None:
-    engine = _engine(loaded, num_blocks=12)
+    engine = _engine(loaded, num_blocks=12, prefix_caching=prefix_caching)
     for i in SHORT_PROMPTS:
         engine.add_request(str(i), prompt_ids[i], GREEDY_SHORT)
     outputs: dict[str, list[int]] = {}

@@ -33,6 +33,9 @@ class EngineConfig:
     kv_budget_gb: float = field(
         default=1.0, metadata={"help": "memory for the paged KV cache, in GB (1e9 bytes)"}
     )
+    enable_prefix_caching: bool = field(
+        default=False, metadata={"help": "reuse KV blocks of identical prompt prefixes across requests"}
+    )
     attention_backend: str = field(
         default="naive",
         metadata={"help": "naive: gather + SDPA; flash: flash_attn_with_kvcache (CUDA)", "choices": ["naive", "flash"]},

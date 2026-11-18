@@ -59,11 +59,13 @@ class Scheduler:
             # leaving that headroom stops a fresh admission from being preempted at
             # once by the sequences it just crowded out.
             headroom = len(self.running)
-            if seq.num_tokens > budget or bm.blocks_needed(seq.num_tokens) + headroom > bm.num_free_blocks:
+            token_ids = seq.token_ids
+            uncached = len(token_ids) - len(bm.match_prefix(token_ids)) * bm.block_size
+            if uncached > budget or not bm.can_allocate(token_ids, reserve=headroom):
                 break
             self.waiting.popleft()
-            budget -= seq.num_tokens
-            bm.allocate(seq.request_id, seq.num_tokens)
+            budget -= uncached
+            seq.num_computed_tokens = bm.allocate(seq.request_id, token_ids)
             seq.status = SequenceStatus.RUNNING
             self.running.append(seq)
             admitted.append(seq)
@@ -93,6 +95,9 @@ class Scheduler:
     def _output(self, seqs: list[Sequence], is_prefill: bool) -> SchedulerOutput:
         tables = [list(self.block_manager.block_tables[s.request_id]) for s in seqs]
         return SchedulerOutput(seqs, is_prefill, tables)
+
+    def register_computed(self, seq: Sequence) -> None:
+        self.block_manager.register_full_blocks(seq.request_id, seq.token_ids, seq.num_computed_tokens)
 
     def free_finished(self) -> list[Sequence]:
         finished = [s for s in self.running if s.finished]
