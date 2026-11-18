@@ -175,3 +175,56 @@ step, so a prefix hit lets more requests be admitted in the same step.
 ### Hit rate
 The block manager counts prompt tokens it was asked to place and how many were served
 from the cache. Readmission after preemption is counted like any other admission.
+
+## Phase 6: server
+
+### One engine loop; handlers only enqueue
+`AsyncEngine` runs a single asyncio task. Request handlers call `submit` and `abort`,
+which append to an operation queue and wake the loop. The loop applies queued
+operations between steps and runs `engine.step` on a one-thread executor so the event
+loop stays responsive while the model runs. The engine is therefore only ever touched
+by one party at a time and needs no locks. Alternative: a lock around the engine, which
+would let handlers call `add_request` directly but would block them for the length of a
+step. The `/metrics` handler reads queue lengths and counters while a step may be
+running; those are plain reads of integers and list lengths, and a slightly stale
+value is acceptable for a gauge.
+
+### Each request owns an asyncio queue
+The loop dispatches every step's outputs to the queue of the request they belong to.
+If the loop dies, every waiting queue is handed the exception and `/health` returns
+503, so clients fail instead of hanging.
+
+### Disconnects abort the request
+The generator that feeds a response checks `is_disconnected` at most once per
+`--disconnect-poll-interval-s` and aborts the request if the client is gone. Its
+`finally` block also aborts when the generator is closed early, which is how Starlette
+reports a dropped streaming connection. Both paths end in `abort_request`, which frees
+the sequence's blocks. Two tests (streaming and non-streaming) check that the block pool
+is full again after the client leaves.
+
+### Unsupported parameters are errors, not no-ops
+Request models forbid unknown fields, so `n`, `stop`, `logprobs` and similar return
+422 instead of being accepted and ignored. Supported beyond the basics: `ignore_eos`
+and `stream_options.include_usage`, because `vllm bench serve` sends them.
+
+### Length errors follow the OpenAI shape
+If prompt tokens plus `max_tokens` exceed `--max-model-len`, the response is a 400 with
+the usual `error.message` body naming both numbers. Chat requests that give no
+`max_tokens` generate up to the remaining context.
+
+### Streaming detokenization
+Text deltas come from decoding all generated ids and emitting the new suffix. A trailing
+U+FFFD means a multi-byte character is incomplete, so it is held back until the next
+token or the end of the stream. Special tokens (end of turn) are skipped in output text
+but still counted in `usage.completion_tokens`.
+
+### Metrics
+TTFT is arrival to first generated token; TPOT is the mean gap between tokens after
+the first, observed once per finished request. KV usage counts only blocks held by
+running sequences, since cached free blocks can be taken at any time.
+
+### Dockerfile is untested
+Docker is not installed on the development machine, so the image has not been built.
+It installs the package with the server extra on `python:3.11-slim` and starts
+`python -m minivllm.server`. The pip `torch` wheel on Linux includes CUDA support, but
+that has not been checked either.
