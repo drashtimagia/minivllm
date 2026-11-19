@@ -22,6 +22,8 @@ class Qwen2Config:
     rms_norm_eps: float
     rope_theta: float
     tie_word_embeddings: bool
+    # Qwen2 puts a bias on the query, key and value projections; Llama does not.
+    attention_bias: bool
 
     @property
     def head_dim(self) -> int:
@@ -30,9 +32,18 @@ class Qwen2Config:
     @classmethod
     def from_model_dir(cls, model_dir: Path) -> "Qwen2Config":
         raw = json.loads((model_dir / "config.json").read_text())
-        if raw["model_type"] != "qwen2":
-            raise ValueError(f"expected a qwen2 checkpoint, got model_type={raw['model_type']!r}")
-        return cls(**{name: raw[name] for name in cls.__dataclass_fields__})
+        if raw["model_type"] not in ("qwen2", "llama"):
+            raise ValueError(f"expected a qwen2 or llama checkpoint, got model_type={raw['model_type']!r}")
+        if raw.get("rope_scaling"):
+            raise ValueError(f"rope_scaling is not supported, got {raw['rope_scaling']!r}")
+        # Newer transformers writes rope settings under "rope_parameters" instead of
+        # the top level; plain rotary embeddings are the only kind implemented.
+        rope = raw.get("rope_parameters", {})
+        if rope.get("rope_type", "default") != "default":
+            raise ValueError(f"rope_type {rope['rope_type']!r} is not supported")
+        raw.setdefault("rope_theta", rope.get("rope_theta"))
+        fields = {name: raw[name] for name in cls.__dataclass_fields__ if name != "attention_bias"}
+        return cls(attention_bias=raw.get("attention_bias", raw["model_type"] == "qwen2"), **fields)
 
 
 class RMSNorm(nn.Module):
@@ -80,9 +91,9 @@ class Qwen2Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
-        self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=True)
-        self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
-        self.v_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
+        self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.attention_bias)
+        self.v_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
 
     def forward(
