@@ -1,3 +1,4 @@
+import hashlib
 from collections import OrderedDict, deque
 
 
@@ -117,7 +118,10 @@ class BlockManager:
         self._seq_hashes.pop(seq_id)
 
     def _block_hash(self, parent: int | None, tokens: list[int]) -> int:
-        return hash((parent, tuple(tokens)))
+        # sha256 rather than Python's hash: a collision would silently serve another
+        # prefix's keys and values, so the odds must be cryptographically small.
+        digest = hashlib.sha256(f"{parent}:{tokens}".encode()).digest()
+        return int.from_bytes(digest[:16], "big")
 
     def _acquire(self, block: int) -> None:
         if self.ref_counts[block] == 0:
