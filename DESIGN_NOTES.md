@@ -134,14 +134,13 @@ paged cache and receives the pool, the block tables and the step layout.
 ## Phase 5: prefix caching
 
 ### Hash chain over full blocks only
-A block is registered under `hash((parent_hash, block_tokens))`, where the parent hash
-is that of the previous block (None for the first). The hash therefore names the whole
-prefix up to and including the block, so two blocks with identical tokens but different
-histories never collide on purpose. Partial blocks are never registered: they are still
-being written. Python's built-in `hash` on a tuple of ints is a 64 bit value; an
-accidental collision would silently serve the wrong keys and values. vLLM offers sha256
-for that reason; the odds here are negligible for the workloads in this project, and a
-cryptographic hash is a one-line change in `_block_hash` if that ever matters.
+A block is registered under `sha256(parent_hash : block_tokens)`, truncated to 128 bits,
+where the parent hash is that of the previous block (None for the first). The hash
+therefore names the whole prefix up to and including the block, so two blocks with
+identical tokens but different histories get different keys. Partial blocks are never
+registered: they are still being written. sha256 is used instead of Python's built-in
+`hash` because a collision would silently serve another prefix's keys and values; the
+cost is negligible next to a model step.
 
 ### The block holding the last token is always recomputed
 Matching stops before the block that contains a prompt's final token. Even a fully
@@ -345,3 +344,29 @@ uses it too.
 Whether `flash_attn_with_kvcache` is safe to capture with its default split heuristics,
 and whether it accepts block size 16, are both unchecked. If capture fails or outputs
 differ from eager, `test_graph_decode_matches_eager_decode` is the first thing to run.
+
+## Llama support
+
+### Llama is the Qwen2 model with no attention bias
+The two architectures coincide apart from the bias on the query, key and value
+projections, so Llama checkpoints load through the same classes with
+`attention_bias=False`. A second model file would copy about 150 lines to change one
+flag, and the project rules rule out an abstraction with a single implementation. The
+class names still say Qwen2; renaming them is cosmetic.
+
+### Rope scaling is rejected, not ignored
+Llama 3 checkpoints use scaled rotary embeddings, which are not implemented. Loading one
+raises an error rather than running with the wrong positions and degrading silently.
+Both the old (`rope_theta` at the top level) and the new (`rope_parameters`) config
+layouts are read.
+
+### Tested against a random model
+There is no tokenizer or real Llama checkpoint in the tests: a tiny random-weight HF
+Llama is saved to disk, and our logits and greedy engine output are compared with HF's.
+That checks the architecture and weight loading, not behaviour on real weights.
+
+## bf16 versus HF
+Greedy token agreement is only meaningful in float32; in bfloat16 reordered floating
+point work can legitimately flip a near-tie. The bf16 test therefore checks the whole
+last-position logit vector (cosine similarity above 0.999) and requires the argmax to
+agree on most prompts.

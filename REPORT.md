@@ -18,7 +18,7 @@ machine (Apple A18 Pro, 8 GB RAM). No GPU was available.
 
 ## Test results
 
-The last full run of the suite on CPU: 83 passed, 2 skipped. The two skipped tests are
+The last full run of the suite on CPU: 89 passed, 2 skipped. The two skipped tests are
 GPU only: the flash backend against the naive backend, and CUDA graph decode against
 eager decode. The master correctness test compares greedy output with HF transformers
 generate token for token on 20 prompts (short, long, multilingual, code), 64 new tokens
@@ -51,19 +51,21 @@ files; it is not written here because nothing has been measured.
 
 ## Known limitations
 
-- Qwen2 only. The architecture notes mention Llama; there is no Llama model.
+- Qwen2 checkpoints are the only ones run end to end. Llama-architecture support (no
+  rope scaling) is tested against a tiny random-weight HF Llama, not a real checkpoint,
+  and Llama 3 checkpoints are rejected because they use rope scaling.
 - `vllm bench serve` and `vllm serve` flags were checked against vLLM's source tree, not
   against an installed vLLM.
 - The Dockerfile has never been built.
 - The static baseline ignores `--kv-budget-gb`; it sizes its cache per batch.
-- Prefix cache hashes use Python's 64 bit `hash`; a collision would silently return wrong
-  keys and values. A cryptographic hash is a one line change.
 - The server reads engine counters from the event loop while a step may be running on a
   worker thread. Gauge values can be one step stale.
 - `/metrics` KV usage counts only blocks held by running sequences.
 - vLLM runs with CUDA graphs and chunked prefill by default; the benchmark includes an
   eager vLLM configuration, but the feature sets still differ.
-- CPU tests run in float32 only. bfloat16 outputs are not compared with HF.
+- Token-for-token agreement with HF is checked in float32 only. In bfloat16 the test
+  checks logit closeness (cosine similarity and top-1 agreement), since reordered
+  floating point work can legitimately flip a near-tie.
 
 ## Shortcuts taken
 
@@ -78,4 +80,4 @@ files; it is not written here because nothing has been measured.
 1. Do the GPU runs above and fix whatever they find in the flash and graph paths.
 2. Write the "Why I built this" section of the README.
 3. Replace the per prompt flash calls with one varlen call and measure it.
-4. Add a Llama model, which would test whether the model boundary is as clean as intended.
+4. Run a real Llama checkpoint without rope scaling, and add rope scaling for Llama 3.
